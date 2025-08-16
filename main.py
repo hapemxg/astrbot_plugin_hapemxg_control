@@ -2,11 +2,12 @@
 """
 一个集成了数据模型、服务逻辑和插件主类的单文件 AstrBot 插件。
 
-v2.8.1 (权限修正版):
+v2.9.0 (独立人格版):
+- [核心修改] /reply LLM 功能不再从全局上下文中动态获取人格，而是从本插件的配置文件中读取独立的 'main_persona_prompt'。
+- [目的] 此修改旨在解决因其他插件（如表情包管理器）修改全局人格配置而导致的“状态污染”问题，确保远程控制回复的纯粹性和可预测性。
 - [BUG修复] 修正了管理员权限的实现方式，遵循官方文档使用 @filter.permission_type(filter.PermissionType.ADMIN)。
 - [权限增强] /fetch 和 /reply 指令现在仅限机器人管理员使用。
 - [功能新增] /reply <编号> LLM <额外指令> 功能实现。允许管理员在生成回复时向LLM附加临时指令。
-- [Prompt工程] 动态构建发送给LLM的User Prompt，将管理员的额外指令清晰地传达给模型。
 """
 
 import re
@@ -21,8 +22,6 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Reply, Plain
 from astrbot.api.star import Context, Star, register
-# [修正] 移除错误的导入
-# from astrbot.api.permission import BOT_ADMIN 
 
 
 # =============================================================================
@@ -146,11 +145,14 @@ def stringify_message(message: any) -> str:
 # =============================================================================
 class MessageService:
     """负责消息处理的核心服务，直接与平台 API 交互。"""
-    def __init__(self, state: SessionState, context: Context, config: dict):
+    # [MODIFIED] __init__ 方法接收新增的 main_persona_prompt 参数
+    def __init__(self, state: SessionState, context: Context, config: dict, main_persona_prompt: str):
         self.state = state
         self.context = context
         self.config = config
         self.llm_provider_name = self.config.get("llm_provider_name")
+        # [MODIFIED] 保存从配置文件传入的独立人格
+        self.main_persona_prompt = main_persona_prompt
 
     async def fetch_history(self, event: AstrMessageEvent, controller_sid: str, target_sid: str, count: int, since: Optional[datetime]) -> SessionCache:
         platform, msg_type, target_id = parse_sid(target_sid)
@@ -247,7 +249,9 @@ class MessageService:
         
         target_message = message_context[-1]
 
-        persona_prompt = await self._get_active_persona_prompt(cache.target_sid)
+        # [MODIFIED] 直接使用从配置文件中读取的独立人格，不再动态获取
+        persona_prompt = self.main_persona_prompt
+        
         history_str = "\n".join(
             f"[{msg.sender_name}]: {stringify_message(msg.original_raw_event.get('message', ''))}"
             for msg in message_context
@@ -265,7 +269,7 @@ class MessageService:
 你的回复应该直接就是聊天内容，不要包含如“回复：”或任何额外解释。"""
 
         try:
-            logger.debug(f"LLM System Prompt:\n{persona_prompt}")
+            logger.debug(f"LLM System Prompt (Independent):\n{persona_prompt}")
             logger.debug(f"LLM User Prompt:\n{user_prompt}")
             
             response = await provider.text_chat(
@@ -282,35 +286,13 @@ class MessageService:
         logger.info(f"LLM生成回复成功，将发送至 {cache.target_sid}。内容: {generated_content[:50]}...")
         await self.send_reply(event, controller_sid, message_index, generated_content)
 
-    async def _get_active_persona_prompt(self, target_sid: str) -> str:
-        """获取目标会话当前激活的人格提示词。"""
-        try:
-            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(target_sid)
-            persona_id = self.context.provider_manager.selected_default_persona["name"]
-
-            if curr_cid:
-                conversation = await self.context.conversation_manager.get_conversation(target_sid, curr_cid)
-                if conversation and conversation.persona_id:
-                    persona_id = conversation.persona_id
-
-            if not persona_id or persona_id == "[%None]":
-                return "你是一个友好、乐于助人的AI助手。"
-
-            for persona in self.context.provider_manager.personas:
-                if persona.get("name") == persona_id:
-                    return persona.get("prompt", "")
-            
-            logger.warning(f"无法为目标会话 '{target_sid}' 找到人格ID为 '{persona_id}' 的完整人格。")
-            return "你是一个友好、乐于助人的AI助手。"
-        except Exception as e:
-            logger.error(f"为 SID '{target_sid}' 获取激活的人格时发生异常: {e}", exc_info=True)
-            return "你是一个友好、乐于助人的AI助手。"
+    # [REMOVED] _get_active_persona_prompt 方法已被移除，因为它不再被需要
 
 
 # =============================================================================
 # 7. 插件主类 (Plugin Class - The Entry Point)
 # =============================================================================
-@register("remote_controller", "YourName", "跨会话消息控制插件 (v2.8.1 权限修正)", "2.8.1")
+@register("remote_controller", "YourName", "跨会话消息控制插件 (v2.9.0 独立人格)", "2.9.0")
 class RemoteControlPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -319,7 +301,12 @@ class RemoteControlPlugin(Star):
         self.llm_context_window = self.config.get("llm_context_window", 3)
         self.default_fetch_count = self.config.get("default_fetch_count", 20)
         self.max_fetch_count = self.config.get("max_fetch_count", 100)
-        self.message_service = MessageService(self.state, self.context, self.config)
+        
+        # [MODIFIED] 从本插件的配置中读取独立的人格提示词
+        self.main_persona_prompt = self.config.get("main_persona_prompt", "你是一个友好、乐于助人的AI助手。")
+        
+        # [MODIFIED] 将读取到的人格提示词传递给服务层
+        self.message_service = MessageService(self.state, self.context, self.config, self.main_persona_prompt)
 
     def _format_fetch_success_message(self, cache: SessionCache) -> str:
         lines = [f"已从 {cache.target_sid} 成功拉取 {len(cache.fetched_messages)} 条消息:"]
@@ -329,7 +316,6 @@ class RemoteControlPlugin(Star):
         lines.append("使用 /reply <编号> LLM [额外指令] 来让AI生成回复。")
         return "\n".join(lines)
 
-    # [修正] 采用官方文档推荐的装饰器进行权限控制
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("fetch")
     async def fetch_messages(self, event: AstrMessageEvent, sid: Optional[str] = None, count_or_time: Optional[str] = None):
@@ -363,7 +349,6 @@ class RemoteControlPlugin(Star):
             logger.error(f"处理 /fetch 命令 (SID: {sid}) 时发生未知错误: {e}", exc_info=True)
             yield event.plain_result("发生了一个内部错误，请检查日志或联系管理员。")
 
-    # [修正] 采用官方文档推荐的装饰器进行权限控制
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("reply")
     async def reply_to_message(self, event: AstrMessageEvent):

@@ -1,0 +1,32 @@
+{
+    "llm_provider_name": {
+        "type": "string",
+        "name": "指定LLM回复提供商",
+        "description": "用于 /reply LLM 指令的语言模型提供商ID。如果留空，将使用框架的默认聊天提供商。",
+        "default": ""
+    },
+    "llm_context_window": {
+        "type": "int",
+        "name": "LLM回复上下文数量",
+        "description": "在使用 /reply LLM 时，向前追溯并包含的消息数量，以提供对话背景。建议设置为 3-5 条。",
+        "default": 3
+    },
+    "default_fetch_count": {
+        "type": "int",
+        "name": "默认拉取消息数量",
+        "description": "当使用 /fetch 指令但不指定具体数量时，默认拉取的消息条数。",
+        "default": 20
+    },
+    "max_fetch_count": {
+        "type": "int",
+        "name": "最大拉取消息数量",
+        "description": "使用 /fetch 指令时，单次允许拉取的最大消息条数上限，以防止滥用。",
+        "default": 100
+    },
+	"main_persona_prompt": {
+        "description": "用于控制回复的核心人设提示词",
+        "type": "text",
+        "default": "你是一个AI助手。",
+        "hint": "请将您的长篇核心人设提示词完整地复制粘贴到这里。当触发禁言并生成嘲讽回复时，会使用此人设作为基础。"
+    }
+}
