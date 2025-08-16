@@ -248,27 +248,38 @@ class MessageService:
         # 1. 构建 System Prompt：包含核心人设、固定规则和临时指令
         persona_prompt = self.main_persona_prompt
         
-        # 添加固定的、强制性的规则，防止LLM“出戏”
+        # 添加固定的、强制性的规则
         persona_prompt += "\n\n---\n"
         persona_prompt += "## 核心规则\n"
         persona_prompt += "1. 你的所有回复都必须严格扮演你的人设角色进行对话。\n"
         persona_prompt += "2. 你的回复必须是直接的对话内容，绝对不能包含任何对任务或指令的确认、复述或解释。例如，绝对禁止说“好的，我将回复...”或“遵照指示...”这类话。\n"
-        persona_prompt += "3. 直接输出你作为角色要说的话，不要添加任何前缀，如“回复：”或角色名。"
+        persona_prompt += "3. 直接输出你作为角色要说的话，不要添加任何前缀，如“回复：”或角色名。\n"
+        # 【关键修复】增加第4条规则
+        persona_prompt += "4. 你必须严格按照指令回复指定的最后一条消息，即使你认为回复上下文中的其他消息更合理。绝对禁止偏离目标。\n"
 
         # 如果有来自管理员的临时指令，将其作为一条特殊规则附加
         if extra_instruction:
             persona_prompt += f"\n\n## 本次回复的特殊指令\n请在本次回复中严格遵守以下额外指示： “{extra_instruction}”"
         
-        # 2. 构建 User Prompt：只包含纯净的对话历史
+        # 2. 构建 User Prompt：只包含纯净的对话历史和明确的指令
+        
+        # 【关键修复】在使用前，先定义 target_sender_name 变量
+        # message_context 列表中的最后一个元素就是我们的目标消息
+        target_sender_name = message_context[-1].sender_name
+
         history_str = "\n".join(
             f"[{msg.sender_name}]: {stringify_message(msg.original_raw_event.get('message', ''))}"
             for msg in message_context
         )
+        
+        # 【关键修复】使用新的、带有强制指令的 User Prompt
         user_prompt = f"""以下是你正在参与的对话的最新聊天记录：
 ---
 {history_str}
 ---
-请根据以上对话内容，生成你的下一句回复。"""
+**你的任务是：** 必须直接针对以上聊天记录中的 **最后一条消息**（也就是由 **“{target_sender_name}”** 发送的消息）生成一句回复。
+
+请严格执行任务，直接输出回复内容。"""
         
         try:
             logger.debug(f"LLM System Prompt (Optimized):\n{persona_prompt}")
