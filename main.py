@@ -2,12 +2,11 @@
 """
 一个集成了数据模型、服务逻辑和插件主类的单文件 AstrBot 插件。
 
-v2.9.0 (独立人格版):
-- [核心修改] /reply LLM 功能不再从全局上下文中动态获取人格，而是从本插件的配置文件中读取独立的 'main_persona_prompt'。
-- [目的] 此修改旨在解决因其他插件（如表情包管理器）修改全局人格配置而导致的“状态污染”问题，确保远程控制回复的纯粹性和可预测性。
-- [BUG修复] 修正了管理员权限的实现方式，遵循官方文档使用 @filter.permission_type(filter.PermissionType.ADMIN)。
-- [权限增强] /fetch 和 /reply 指令现在仅限机器人管理员使用。
-- [功能新增] /reply <编号> LLM <额外指令> 功能实现。允许管理员在生成回复时向LLM附加临时指令。
+v2.9.1 (提示词优化版):
+- [核心修改] 优化了发送给LLM的提示词结构，以解决“虚空对话”和泄露任务指令的问题。
+- [策略] 将所有规则（包括管理员的临时指令）都整合到 System Prompt 中，并使用更强的约束性语言。User Prompt 则只保留纯净的聊天记录。
+- [目的] 确保LLM的输出是直接、沉浸式的角色扮演回复，而不是对指令的“元回应”（meta-response）。
+- [依赖] 继续使用 v2.9.0 的独立人格配置 'main_persona_prompt'。
 """
 
 import re
@@ -145,13 +144,11 @@ def stringify_message(message: any) -> str:
 # =============================================================================
 class MessageService:
     """负责消息处理的核心服务，直接与平台 API 交互。"""
-    # [MODIFIED] __init__ 方法接收新增的 main_persona_prompt 参数
     def __init__(self, state: SessionState, context: Context, config: dict, main_persona_prompt: str):
         self.state = state
         self.context = context
         self.config = config
         self.llm_provider_name = self.config.get("llm_provider_name")
-        # [MODIFIED] 保存从配置文件传入的独立人格
         self.main_persona_prompt = main_persona_prompt
 
     async def fetch_history(self, event: AstrMessageEvent, controller_sid: str, target_sid: str, count: int, since: Optional[datetime]) -> SessionCache:
@@ -247,30 +244,35 @@ class MessageService:
         if not message_context:
             raise RemoteControlError(f"编号 {message_index} 无效。")
         
-        target_message = message_context[-1]
-
-        # [MODIFIED] 直接使用从配置文件中读取的独立人格，不再动态获取
+        # [MODIFIED] 提示词结构优化
+        # 1. 构建 System Prompt：包含核心人设、固定规则和临时指令
         persona_prompt = self.main_persona_prompt
         
+        # 添加固定的、强制性的规则，防止LLM“出戏”
+        persona_prompt += "\n\n---\n"
+        persona_prompt += "## 核心规则\n"
+        persona_prompt += "1. 你的所有回复都必须严格扮演你的人设角色进行对话。\n"
+        persona_prompt += "2. 你的回复必须是直接的对话内容，绝对不能包含任何对任务或指令的确认、复述或解释。例如，绝对禁止说“好的，我将回复...”或“遵照指示...”这类话。\n"
+        persona_prompt += "3. 直接输出你作为角色要说的话，不要添加任何前缀，如“回复：”或角色名。"
+
+        # 如果有来自管理员的临时指令，将其作为一条特殊规则附加
+        if extra_instruction:
+            persona_prompt += f"\n\n## 本次回复的特殊指令\n请在本次回复中严格遵守以下额外指示： “{extra_instruction}”"
+        
+        # 2. 构建 User Prompt：只包含纯净的对话历史
         history_str = "\n".join(
             f"[{msg.sender_name}]: {stringify_message(msg.original_raw_event.get('message', ''))}"
             for msg in message_context
         )
-        
-        task_description = f'任务：请你代入你的角色，针对最后一条消息（来自"{target_message.sender_name}"）生成一个自然、直接、且符合上下文的回复。'
-        if extra_instruction:
-            task_description += f'\n管理员对本次回复有如下指示，请务必遵守：“{extra_instruction}”。'
-
-        user_prompt = f"""以下是最近的一段聊天记录：
+        user_prompt = f"""以下是你正在参与的对话的最新聊天记录：
 ---
 {history_str}
 ---
-{task_description}
-你的回复应该直接就是聊天内容，不要包含如“回复：”或任何额外解释。"""
-
+请根据以上对话内容，生成你的下一句回复。"""
+        
         try:
-            logger.debug(f"LLM System Prompt (Independent):\n{persona_prompt}")
-            logger.debug(f"LLM User Prompt:\n{user_prompt}")
+            logger.debug(f"LLM System Prompt (Optimized):\n{persona_prompt}")
+            logger.debug(f"LLM User Prompt (Clean):\n{user_prompt}")
             
             response = await provider.text_chat(
                 prompt=user_prompt,
@@ -286,13 +288,11 @@ class MessageService:
         logger.info(f"LLM生成回复成功，将发送至 {cache.target_sid}。内容: {generated_content[:50]}...")
         await self.send_reply(event, controller_sid, message_index, generated_content)
 
-    # [REMOVED] _get_active_persona_prompt 方法已被移除，因为它不再被需要
-
 
 # =============================================================================
 # 7. 插件主类 (Plugin Class - The Entry Point)
 # =============================================================================
-@register("remote_controller", "YourName", "跨会话消息控制插件 (v2.9.0 独立人格)", "2.9.0")
+@register("remote_controller", "YourName", "跨会话消息控制插件 (v2.9.1 提示词优化)", "2.9.1")
 class RemoteControlPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -302,10 +302,8 @@ class RemoteControlPlugin(Star):
         self.default_fetch_count = self.config.get("default_fetch_count", 20)
         self.max_fetch_count = self.config.get("max_fetch_count", 100)
         
-        # [MODIFIED] 从本插件的配置中读取独立的人格提示词
         self.main_persona_prompt = self.config.get("main_persona_prompt", "你是一个友好、乐于助人的AI助手。")
         
-        # [MODIFIED] 将读取到的人格提示词传递给服务层
         self.message_service = MessageService(self.state, self.context, self.config, self.main_persona_prompt)
 
     def _format_fetch_success_message(self, cache: SessionCache) -> str:
